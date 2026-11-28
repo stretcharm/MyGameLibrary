@@ -32,6 +32,8 @@ from pathlib import Path
 
 import duckdb
 
+import gamelib_db
+
 DEFAULT_LIBRARY = Path(os.environ.get("APPDATA", "")) / "Playnite" / "library"
 
 # Flattened, analysis-friendly view over the raw Playnite tables. game_insights.py
@@ -604,8 +606,9 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     db_path = Path(args.duckdb) if args.duckdb else out / "playnite.duckdb"
-
     playnite_exe = require_playnite_exe(args.dll) if args.fresh_backup else None  # before loading .NET
+    gamelib_db.connect(db_path).close()  # fail fast (before the slow dump) if the DuckDB file is locked
+
     dll = find_litedb_dll(args.dll)
     JsonSerializer, LiteDatabase = load_litedb(dll)
 
@@ -633,7 +636,7 @@ def main():
                 print(f"!! {src.name}: {e}")
                 failures.append(f"{src.name}: {e}")
 
-    con = duckdb.connect(str(db_path))
+    con = gamelib_db.connect(db_path)
     for table, target, n in exported:
         if n == 0:
             # An empty collection must not leave a previous run's data behind. If the
