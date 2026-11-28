@@ -68,3 +68,5 @@ Both tools can also be run directly as scripts, e.g.
 
 The default paths are relative to the project folder, so run the tools from a
 checkout (the `uv sync` install is editable).
+
+Run tests: `uv run pytest`

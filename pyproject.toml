@@ -22,3 +22,12 @@ only-include = ["playnite_to_duckdb.py", "game_insights.py", "templates"]
 
 [tool.hatch.build.targets.sdist]
 only-include = ["playnite_to_duckdb.py", "game_insights.py", "templates", "README.md", "pyproject.toml"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
