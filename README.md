@@ -16,9 +16,8 @@ uv sync
 
 ## Workflow
 
-1. **Close Playnite.** A running Playnite locks its library files and the copy
-   fails with a sharing violation.
-2. **Export** the library to NDJSON and a DuckDB database:
+1. **Export** the library to NDJSON and a DuckDB database. Playnite does not
+   need to be closed:
 
    ```
    uv run gamelib-export
@@ -28,7 +27,24 @@ uv sync
    NDJSON, and loaded into DuckDB tables plus a flattened `playnite_games`
    view. The default output is `playnite_export/playnite.duckdb`. The command
    exits non-zero if any file or table failed.
-3. **Generate the dashboard:**
+
+   A running Playnite holds its library files open exclusively, so they can't
+   be read live. When the copy fails because of that, the export falls back to
+   the newest Playnite backup zip (`AutoBackupDir` from Playnite's
+   `config.json`, else `%APPDATA%\Playnite\Backup`) and prints a warning with
+   that backup's timestamp and age. Only `library/*.db` is extracted from the
+   zip, which is never modified. If that backup is corrupt or has no library
+   files, the next-newest one is tried. The data is as old as the backup; if there is
+   no backup at all, the export stops and tells you to close Playnite or use
+   `--fresh-backup`.
+
+   - `--from-backup PATH` exports from a specific backup zip.
+   - `--fresh-backup` asks Playnite to write a new backup first
+     (`Playnite.DesktopApp.exe --backup <config>`), waits for the zip, then
+     exports from it. **This restarts Playnite**, and Playnite cancels the
+     backup if a game is running. Use `--backup-timeout` to change how long it
+     waits (default 180 s).
+2. **Generate the dashboard:**
 
    ```
    uv run gamelib-insights --open
@@ -48,6 +64,9 @@ uv sync
 | `--dll` | auto-detected | Path to Playnite's `LiteDB.dll` (see below) |
 | `--out` | `playnite_export` | Output folder |
 | `--duckdb` | `<out>/playnite.duckdb` | DuckDB file to write |
+| `--from-backup` | off | Export from this Playnite backup zip |
+| `--fresh-backup` | off | Have Playnite write a new backup first (restarts Playnite) |
+| `--backup-timeout` | `180` | Seconds to wait for `--fresh-backup` |
 
 `LiteDB.dll` is found automatically. The first match wins, and the export prints
 which source it used:
