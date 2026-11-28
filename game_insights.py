@@ -26,12 +26,6 @@ DEFAULT_OUT = Path(__file__).parent / "playnite_export" / "game_insights.html"
 TEMPLATE_PATH = Path(__file__).parent / "templates" / "insights.html"
 
 
-def split_csv(val: str | None) -> list[str]:
-    if not val:
-        return []
-    return [part.strip() for part in val.split(",") if part.strip()]
-
-
 def normalize_title(name: str) -> str:
     """Normalize a game title for cross-store deduplication."""
     return "".join(ch for ch in name.lower() if ch.isalnum())
@@ -216,8 +210,8 @@ def load_games(db_path: Path) -> list[dict[str, Any]]:
             gid,
             name,
             store,
-            genres_str,
-            series_str,
+            genres,
+            series_list,
             hours,
             is_installed,
             install_size,
@@ -232,8 +226,6 @@ def load_games(db_path: Path) -> list[dict[str, Any]]:
             is_hidden,
         ) = r
 
-        genres = split_csv(genres_str)
-        series_list = split_csv(series_str)
         developers: list[str] = []
         if dev_ids:
             for did in dev_ids:
