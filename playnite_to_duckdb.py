@@ -10,9 +10,10 @@ Close Playnite before running (files are copied first, but a running Playnite
 may have un-flushed changes).
 
 Usage:
-    uv add pythonnet
     uv run playnite_to_duckdb.py
-    uv run playnite_to_duckdb.py --dll ""K:\\Games\\Playnite\\Playnite\\LiteDB.dll"" --out export
+    uv run playnite_to_duckdb.py --dll "K:\\Games\\Playnite\\Playnite\\LiteDB.dll" --out export
+
+Exits non-zero (after exporting everything it can) if any file or table failed.
 """
 import argparse
 import json
@@ -22,12 +23,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from pythonnet import load
-
-load("netfx")  # Playnite's LiteDB.dll loads fine on the Windows .NET Framework runtime
-import clr  # noqa: E402
-
-import duckdb  # noqa: E402
+import duckdb
 
 DEFAULT_LIBRARY = Path(os.environ.get("APPDATA", "")) / "Playnite" / "library"
 
@@ -134,6 +130,23 @@ def find_litedb_dll(explicit: str | None) -> Path:
     )
 
 
+def load_litedb(dll: Path):
+    """Load the .NET runtime and LiteDB.dll; return (JsonSerializer, LiteDatabase).
+
+    Done here rather than at import time so the module can be imported (e.g. for
+    tests) without pythonnet's runtime or Windows.
+    """
+    from pythonnet import load
+
+    load("netfx")  # Playnite's LiteDB.dll loads fine on the Windows .NET Framework runtime
+    import clr
+
+    clr.AddReference(str(dll))
+    from LiteDB import JsonSerializer, LiteDatabase  # type: ignore
+
+    return JsonSerializer, LiteDatabase
+
+
 def unwrap(o):
     """Turn LiteDB extended-JSON wrappers ($guid, $date, ...) into plain values."""
     if isinstance(o, dict):
@@ -151,6 +164,13 @@ def unwrap(o):
     return o
 
 
+def print_failures(failures: list[str]) -> None:
+    if failures:
+        print(f"\n!! {len(failures)} failure(s):", file=sys.stderr)
+        for f in failures:
+            print(f"   - {f}", file=sys.stderr)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--library", default=str(DEFAULT_LIBRARY), help="Playnite library folder")
@@ -166,16 +186,16 @@ def main():
 
     dll = find_litedb_dll(args.dll)
     print(f"Using {dll}")
-    clr.AddReference(str(dll))
-    from LiteDB import JsonSerializer, LiteDatabase  # type: ignore  # noqa: E402
+    JsonSerializer, LiteDatabase = load_litedb(dll)
 
     exported: list[tuple[str, Path, int]] = []
+    failures: list[str] = []
 
     with tempfile.TemporaryDirectory() as tmp:
         for src in sorted(library.glob("*.db")):
             copy = Path(tmp) / src.name
-            shutil.copy2(src, copy)  # never touch the live file
             try:
+                shutil.copy2(src, copy)  # never touch the live file
                 with LiteDatabase(f"Filename={copy};ReadOnly=true") as db:
                     for coll_name in db.GetCollectionNames():
                         table = src.stem if coll_name.lower() in (src.stem.lower(), "") else f"{src.stem}_{coll_name}"
@@ -190,10 +210,18 @@ def main():
                         exported.append((table, target, n))
             except Exception as e:  # keep going if one file is odd
                 print(f"!! {src.name}: {e}")
+                failures.append(f"{src.name}: {e}")
 
     con = duckdb.connect(str(db_path))
     for table, target, n in exported:
         if n == 0:
+            # An empty collection must not leave a previous run's data behind. If the
+            # view needs it, create_playnite_games_view recreates an empty typed stub.
+            try:
+                con.execute(f'DROP TABLE IF EXISTS "{table}"')
+            except Exception as e:
+                print(f"!! DuckDB drop failed for {table}: {e}")
+                failures.append(f"DuckDB drop {table}: {e}")
             continue
         path = target.resolve().as_posix().replace("'", "''")
         try:
@@ -204,13 +232,18 @@ def main():
             )
         except Exception as e:
             print(f"!! DuckDB load failed for {table}: {e}")
+            failures.append(f"DuckDB load {table}: {e}")
     try:
         create_playnite_games_view(con)
     except duckdb.Error as e:
         con.close()
+        print_failures(failures)
         sys.exit(f"!! Couldn't create playnite_games view: {e}")
     con.close()
     print(f"\nDone. DuckDB file: {db_path}")
+    if failures:
+        print_failures(failures)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
