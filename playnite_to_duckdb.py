@@ -40,10 +40,12 @@ SELECT
     g._Id AS playnite_id,
     g."Name" AS game_name,
     s."Name" AS store_source,
-    (SELECT string_agg(ge."Name", ', ' ORDER BY ge."Name")
-     FROM genres_Genre AS ge WHERE list_contains(g.GenreIds, ge._Id)) AS genres,
-    (SELECT string_agg(se."Name", ', ' ORDER BY se."Name")
-     FROM series AS se WHERE list_contains(g.SeriesIds, se._Id)) AS series,
+    COALESCE((SELECT list(ge."Name" ORDER BY ge."Name")
+              FROM genres_Genre AS ge WHERE list_contains(g.GenreIds, ge._Id)),
+             []::VARCHAR[]) AS genres,
+    COALESCE((SELECT list(se."Name" ORDER BY se."Name")
+              FROM series AS se WHERE list_contains(g.SeriesIds, se._Id)),
+             []::VARCHAR[]) AS series,
     round(g.Playtime / 3600.0, 2) AS hours_played,
     g.IsInstalled AS is_installed,
     g.InstallSize AS install_size,
