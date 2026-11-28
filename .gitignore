@@ -13,3 +13,4 @@ wheels/
 playnite_export/
 
 tmp/
+.pytest_cache/
