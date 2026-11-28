@@ -100,4 +100,45 @@ Both tools can also be run directly as scripts, e.g.
 The default paths are relative to the project folder, so run the tools from a
 checkout (the `uv sync` install is editable).
 
+## DuckDB server (optional)
+
+DuckDB allows only one process to open a database file at a time, so a DuckDB
+shell or notebook holding `playnite.duckdb` normally makes the export and
+dashboard fail with a lock error. `gamelib-server` serves the file over DuckDB's
+[Quack](https://duckdb.org/docs/current/quack/overview) protocol instead, on
+localhost only:
+
+```
+uv run gamelib-server
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--db` | `playnite_export/playnite.duckdb` | DuckDB file to serve (created if missing) |
+| `--port` | `9494` | Port to listen on |
+
+The token comes from the `GAMELIB_QUACK_TOKEN` environment variable, or is
+generated at random. The server writes its URL and token to
+`<db>.quack.json` next to the database and deletes it when you stop the server
+with Ctrl+C.
+
+While that file exists, names the same database and its port is listening,
+`gamelib-export` and `gamelib-insights` send their SQL through the server (an
+error from the server, such as a wrong token, is reported as is). Otherwise
+they open the file directly. A leftover file from a server that was killed is
+ignored, with a note. Each command prints which mode it used, and if the file
+is locked by some other DuckDB client they stop with a message saying so.
+
+To query the served database from your own DuckDB session:
+
+```sql
+ATTACH 'quack:localhost' AS gamelib (TOKEN '<token from playnite.duckdb.quack.json>');
+CONNECT gamelib;          -- unqualified names now run on the server
+FROM playnite_games LIMIT 5;
+DISCONNECT;
+```
+
+The `quack` extension is installed on first use, which needs internet access
+once.
+
 Run tests: `uv run pytest`

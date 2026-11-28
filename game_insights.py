@@ -21,7 +21,9 @@ from typing import Any
 
 import duckdb
 
-DEFAULT_DB = Path(__file__).parent / "playnite_export" / "playnite.duckdb"
+import gamelib_db
+from gamelib_db import DEFAULT_DB
+
 DEFAULT_OUT = Path(__file__).parent / "playnite_export" / "game_insights.html"
 TEMPLATE_PATH = Path(__file__).parent / "templates" / "insights.html"
 
@@ -162,7 +164,7 @@ def load_games(db_path: Path) -> list[dict[str, Any]]:
     if not db_path.is_file():
         raise FileNotFoundError(f"DuckDB file not found: {db_path}")
 
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = gamelib_db.connect(db_path, read_only=True)
     try:
         # Map company UUID -> Name for developer lookup
         dev_map: dict[str, str] = {}
