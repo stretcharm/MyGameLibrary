@@ -12,6 +12,7 @@ import argparse
 import json
 import math
 import re
+import sys
 import webbrowser
 from collections import defaultdict
 from datetime import datetime
@@ -180,27 +181,32 @@ def load_games(db_path: Path) -> list[dict[str, Any]]:
 
         query = """
         SELECT
-            CAST(pg.playnite_id AS VARCHAR) AS id,
-            pg.game_name,
-            COALESCE(pg.store_source, 'Unknown') AS store_source,
-            pg.genres,
-            pg.series,
-            COALESCE(pg.hours_played, 0.0) AS hours_played,
-            COALESCE(pg.is_installed, FALSE) AS is_installed,
-            COALESCE(pg.instal_size, gg."InstallSize", 0) AS install_size,
-            pg.community_score,
-            pg.critic_score,
-            pg.score,
-            CAST(gg."ReleaseDate" AS VARCHAR) AS release_date,
-            COALESCE(gg."PlayCount", 0) AS play_count,
-            CAST(pg.last_played AS VARCHAR) AS last_played,
-            COALESCE(gg."CompletionStatus"."Name", 'Not Played') AS completion_status,
-            gg."DeveloperIds" AS developer_ids,
-            COALESCE(gg."Hidden", FALSE) AS is_hidden
-        FROM playnite_games pg
-        LEFT JOIN games_Game gg ON pg.playnite_id = gg._id
+            CAST(playnite_id AS VARCHAR) AS id,
+            game_name,
+            COALESCE(store_source, 'Unknown') AS store_source,
+            genres,
+            series,
+            COALESCE(hours_played, 0.0) AS hours_played,
+            COALESCE(is_installed, FALSE) AS is_installed,
+            COALESCE(install_size, 0) AS install_size,
+            community_score,
+            critic_score,
+            score,
+            CAST(release_date AS VARCHAR) AS release_date,
+            COALESCE(play_count, 0) AS play_count,
+            CAST(last_played AS VARCHAR) AS last_played,
+            COALESCE(completion_status, 'Not Played') AS completion_status,
+            developer_ids,
+            COALESCE(is_hidden, FALSE) AS is_hidden
+        FROM playnite_games
         """
-        rows = con.execute(query).fetchall()
+        try:
+            rows = con.execute(query).fetchall()
+        except (duckdb.BinderException, duckdb.CatalogException) as e:
+            sys.exit(
+                "The playnite_games view in this database is missing or out of date. "
+                f"Re-run playnite_to_duckdb.py to rebuild it.\nOriginal error: {e}"
+            )
     finally:
         con.close()
 

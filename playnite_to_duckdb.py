@@ -31,6 +31,84 @@ import duckdb  # noqa: E402
 
 DEFAULT_LIBRARY = Path(os.environ.get("APPDATA", "")) / "Playnite" / "library"
 
+# Flattened, analysis-friendly view over the raw Playnite tables. game_insights.py
+# reads every per-game field from this view (developer names come from a separate
+# companies_Company lookup), so every game field it needs must be exposed here.
+PLAYNITE_GAMES_VIEW_SQL = """
+CREATE OR REPLACE VIEW playnite_games AS
+SELECT
+    g._Id AS playnite_id,
+    g."Name" AS game_name,
+    s."Name" AS store_source,
+    (SELECT string_agg(ge."Name", ', ' ORDER BY ge."Name")
+     FROM genres_Genre AS ge WHERE list_contains(g.GenreIds, ge._Id)) AS genres,
+    (SELECT string_agg(se."Name", ', ' ORDER BY se."Name")
+     FROM series AS se WHERE list_contains(g.SeriesIds, se._Id)) AS series,
+    round(g.Playtime / 3600.0, 2) AS hours_played,
+    g.IsInstalled AS is_installed,
+    g.InstallSize AS install_size,
+    CAST(g.Added AS TIMESTAMP) AS date_added,
+    CAST(g.LastActivity AS TIMESTAMP) AS last_played,
+    g.CommunityScore AS community_score,
+    g.CriticScore AS critic_score,
+    ((COALESCE(g.CommunityScore, 0) + COALESCE(g.CriticScore, 0))
+     / CASE WHEN g.CriticScore IS NOT NULL AND g.CommunityScore IS NOT NULL THEN 2 ELSE 1 END) AS score,
+    g.ReleaseDate AS release_date,
+    g.PlayCount AS play_count,
+    g.CompletionStatus."Name" AS completion_status,
+    g.DeveloperIds AS developer_ids,
+    g.Hidden AS is_hidden
+FROM games_Game AS g
+LEFT JOIN sources_GameSource AS s ON g.SourceId = s._Id
+"""
+
+# Lookup tables the view joins to. Playnite omits a collection/field from the
+# export when nothing uses it (e.g. a library with no series), so any that are
+# missing are created empty so the view still binds and its columns come out NULL.
+VIEW_LOOKUP_TABLES = {
+    "genres_Genre": '(_Id UUID, "Name" VARCHAR)',
+    "series": '(_Id UUID, "Name" VARCHAR)',
+    "sources_GameSource": '(_Id UUID, "Name" VARCHAR)',
+}
+VIEW_GAME_COLUMNS = {
+    "Name": "VARCHAR",
+    "GenreIds": "UUID[]",
+    "SeriesIds": "UUID[]",
+    "DeveloperIds": "UUID[]",
+    "SourceId": "UUID",
+    "Playtime": "BIGINT",
+    "IsInstalled": "BOOLEAN",
+    "InstallSize": "BIGINT",
+    "Added": "TIMESTAMP WITH TIME ZONE",
+    "LastActivity": "TIMESTAMP WITH TIME ZONE",
+    "CommunityScore": "BIGINT",
+    "CriticScore": "BIGINT",
+    "ReleaseDate": "DATE",
+    "PlayCount": "BIGINT",
+    "CompletionStatus": 'STRUCT(_id UUID, "Name" VARCHAR)',
+    "Hidden": "BOOLEAN",
+}
+
+
+def create_playnite_games_view(con: "duckdb.DuckDBPyConnection") -> None:
+    """Create the playnite_games view, filling in any inputs the export left out.
+
+    Raises duckdb.Error if the view can't be built.
+    """
+    existing = {r[0] for r in con.execute("SELECT table_name FROM information_schema.tables").fetchall()}
+    if "games_Game" not in existing:
+        raise duckdb.Error("no games_Game table was exported")
+    for table, columns in VIEW_LOOKUP_TABLES.items():
+        if table not in existing:
+            print(f"!! {table} missing from the export; its playnite_games column will be NULL")
+            con.execute(f'CREATE TABLE "{table}" {columns}')
+    have = {r[0] for r in con.execute("DESCRIBE games_Game").fetchall()}
+    for column, col_type in VIEW_GAME_COLUMNS.items():
+        if column not in have:
+            print(f"!! games_Game.{column} missing from the export; its playnite_games column will be NULL")
+            con.execute(f'ALTER TABLE games_Game ADD COLUMN "{column}" {col_type}')
+    con.execute(PLAYNITE_GAMES_VIEW_SQL)
+
 
 def find_litedb_dll(explicit: str | None) -> Path:
     candidates = []
@@ -121,6 +199,11 @@ def main():
             )
         except Exception as e:
             print(f"!! DuckDB load failed for {table}: {e}")
+    try:
+        create_playnite_games_view(con)
+    except duckdb.Error as e:
+        con.close()
+        sys.exit(f"!! Couldn't create playnite_games view: {e}")
     con.close()
     print(f"\nDone. DuckDB file: {db_path}")
 
