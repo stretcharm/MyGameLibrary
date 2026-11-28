@@ -590,7 +590,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--library", default=str(DEFAULT_LIBRARY), help="Playnite library folder")
     ap.add_argument("--dll", help="Path to Playnite's LiteDB.dll (default: $GAMELIB_LITEDB, else auto-detected)")
-    ap.add_argument("--out", default="playnite_export", help="Output folder")
+    # Same folder game_insights and gamelib-server read from, whatever the working directory
+    ap.add_argument("--out", default=str(gamelib_db.DEFAULT_DB.parent), help="Output folder")
     ap.add_argument("--duckdb", default=None, help="DuckDB file (default: <out>/playnite.duckdb)")
     source = ap.add_mutually_exclusive_group()
     source.add_argument("--from-backup", metavar="PATH", help="Export from this Playnite backup zip instead of the live library")
