@@ -111,23 +111,165 @@ def create_playnite_games_view(con: "duckdb.DuckDBPyConnection") -> None:
     con.execute(PLAYNITE_GAMES_VIEW_SQL)
 
 
-def find_litedb_dll(explicit: str | None) -> Path:
-    candidates = []
-    if explicit:
-        candidates.append(Path(explicit))
-    local = Path(os.environ.get("LOCALAPPDATA", ""))
-    candidates += [
-        local / "Playnite" / "LiteDB.dll",
-        Path(os.environ.get("PROGRAMFILES", "")) / "Playnite" / "LiteDB.dll",
-        Path(os.environ.get("APPDATA", "")) / "Playnite" / "LiteDB.dll",
+LITEDB_ENV = "GAMELIB_LITEDB"
+DEFAULT_LITEDB = Path(r"K:\Games\Playnite\Playnite\LiteDB.dll")
+PLAYNITE_EXE_NAMES = ("Playnite.DesktopApp.exe", "Playnite.FullscreenApp.exe")
+DESKTOP_EXE = "Playnite.DesktopApp.exe"
+
+
+def _running_playnite_dirs() -> list[Path]:
+    """Folders of any running Playnite.DesktopApp.exe / Playnite.FullscreenApp.exe.
+
+    Walks a ToolHelp process snapshot with ctypes. Fails soft: returns [] off
+    Windows or if anything goes wrong (e.g. access denied for a process).
+    """
+    if sys.platform != "win32":
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        k32.Process32FirstW.argtypes = k32.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(PROCESSENTRY32W)]
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.QueryFullProcessImageNameW.argtypes = [
+            ctypes.c_void_p, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+        ]
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+
+        snap = k32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+        if snap is None or snap == ctypes.c_void_p(-1).value:
+            return []
+        wanted = {n.lower() for n in PLAYNITE_EXE_NAMES}
+        dirs: list[Path] = []
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(entry)
+            ok = k32.Process32FirstW(snap, ctypes.byref(entry))
+            while ok:
+                if entry.szExeFile.lower() in wanted:
+                    proc = k32.OpenProcess(0x1000, False, entry.th32ProcessID)  # QUERY_LIMITED_INFORMATION
+                    if proc:
+                        try:
+                            buf = ctypes.create_unicode_buffer(32768)
+                            size = wintypes.DWORD(len(buf))
+                            if k32.QueryFullProcessImageNameW(proc, 0, buf, ctypes.byref(size)):
+                                folder = Path(buf.value).parent
+                                if folder not in dirs:
+                                    dirs.append(folder)
+                        finally:
+                            k32.CloseHandle(proc)
+                ok = k32.Process32NextW(snap, ctypes.byref(entry))
+        finally:
+            k32.CloseHandle(snap)
+        return dirs
+    except Exception:
+        return []
+
+
+def _registry_install_dirs() -> list[Path]:
+    """InstallLocation from the Playnite uninstall key (HKCU, then HKLM). Fails soft."""
+    try:
+        import winreg
+    except ImportError:
+        return []
+    dirs: list[Path] = []
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            with winreg.OpenKey(hive, r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Playnite") as key:
+                value, _ = winreg.QueryValueEx(key, "InstallLocation")
+            if value:
+                dirs.append(Path(str(value)))
+        except Exception:
+            continue
+    return dirs
+
+
+def _well_known_dirs() -> list[Path]:
+    return [
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Playnite",
+        Path(os.environ.get("PROGRAMFILES", "")) / "Playnite",
+        Path(os.environ.get("APPDATA", "")) / "Playnite",
     ]
-    for c in candidates:
-        if c.is_file():
-            return c
+
+
+def _install_dir_probes():
+    """(source description, probe -> folders) in search order, after --dll/env var.
+
+    Looked up at call time so tests can monkeypatch each probe.
+    """
+    return [
+        ("a running Playnite process", _running_playnite_dirs),
+        ("the Playnite uninstall registry key", _registry_install_dirs),
+        ("a well-known install folder", _well_known_dirs),
+        ("the built-in default path", lambda: [DEFAULT_LITEDB.parent]),
+    ]
+
+
+def _is_file(p: Path) -> bool:
+    try:
+        return p.is_file()
+    except OSError:
+        return False
+
+
+def _search_install_dirs(filename: str):
+    """Yield (source, path) for each existing `filename` in the install-folder probes."""
+    for source, probe in _install_dir_probes():
+        try:
+            folders = probe()
+        except Exception:
+            continue
+        for folder in folders:
+            path = Path(folder) / filename
+            if _is_file(path):
+                yield source, path
+
+
+def find_litedb_dll(explicit: str | None) -> Path:
+    """Locate LiteDB.dll and print which source supplied it.
+
+    Order: --dll, $GAMELIB_LITEDB, a running Playnite, the uninstall registry
+    key, well-known folders, the built-in default path. Every probe fails soft.
+    An explicit --dll or $GAMELIB_LITEDB that isn't a file is an error, not a
+    reason to fall through to auto-detection.
+    """
+    for label, value in (("--dll", explicit), (f"${LITEDB_ENV}", os.environ.get(LITEDB_ENV))):
+        if value:  # explicit choices are never second-guessed by auto-detection
+            path = Path(value)
+            if not _is_file(path):
+                sys.exit(f"{label} points at {path}, which is not a file. Fix or remove it to auto-detect LiteDB.dll.")
+            print(f"Using {path} (from {label})")
+            return path
+    for source, path in _search_install_dirs("LiteDB.dll"):
+        print(f"Using {path} (found via {source})")
+        return path
     sys.exit(
-        "Couldn't find LiteDB.dll. Pass --dll pointing at the copy in your "
-        "Playnite install folder (the one containing Playnite.DesktopApp.exe)."
+        "Couldn't find LiteDB.dll. Pass --dll (or set GAMELIB_LITEDB) pointing at the "
+        "copy in your Playnite install folder (the one containing Playnite.DesktopApp.exe)."
     )
+
+
+def find_playnite_exe() -> Path | None:
+    """Playnite.DesktopApp.exe, located through the same folders as LiteDB.dll."""
+    return next((path for _source, path in _search_install_dirs(DESKTOP_EXE)), None)
 
 
 def load_litedb(dll: Path):
@@ -174,7 +316,7 @@ def print_failures(failures: list[str]) -> None:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--library", default=str(DEFAULT_LIBRARY), help="Playnite library folder")
-    ap.add_argument("--dll", help="Path to Playnite's LiteDB.dll")
+    ap.add_argument("--dll", help="Path to Playnite's LiteDB.dll (default: $GAMELIB_LITEDB, else auto-detected)")
     ap.add_argument("--out", default="playnite_export", help="Output folder")
     ap.add_argument("--duckdb", default=None, help="DuckDB file (default: <out>/playnite.duckdb)")
     args = ap.parse_args()
@@ -185,7 +327,6 @@ def main():
     db_path = Path(args.duckdb) if args.duckdb else out / "playnite.duckdb"
 
     dll = find_litedb_dll(args.dll)
-    print(f"Using {dll}")
     JsonSerializer, LiteDatabase = load_litedb(dll)
 
     exported: list[tuple[str, Path, int]] = []

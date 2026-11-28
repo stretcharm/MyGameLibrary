@@ -21,7 +21,7 @@ uv sync
 2. **Export** the library to NDJSON and a DuckDB database:
 
    ```
-   uv run gamelib-export --dll "K:\Games\Playnite\Playnite\LiteDB.dll"
+   uv run gamelib-export
    ```
 
    Files are copied first (the live library is never touched), dumped to
@@ -45,14 +45,26 @@ uv sync
 | Option | Default | Description |
 | --- | --- | --- |
 | `--library` | `%APPDATA%\Playnite\library` | Playnite library folder |
-| `--dll` | auto-detected | Path to Playnite's `LiteDB.dll` |
+| `--dll` | auto-detected | Path to Playnite's `LiteDB.dll` (see below) |
 | `--out` | `playnite_export` | Output folder |
 | `--duckdb` | `<out>/playnite.duckdb` | DuckDB file to write |
 
-`--dll` is usually needed: the default search only checks `%LOCALAPPDATA%\Playnite`,
-`%PROGRAMFILES%\Playnite` and `%APPDATA%\Playnite`, so installs such as
-`K:\Games\Playnite\Playnite\LiteDB.dll` are not found automatically. Use the copy
-next to `Playnite.DesktopApp.exe`.
+`LiteDB.dll` is found automatically. The first match wins, and the export prints
+which source it used:
+
+1. `--dll`
+2. the `GAMELIB_LITEDB` environment variable
+3. the folder of a running `Playnite.DesktopApp.exe` / `Playnite.FullscreenApp.exe`
+   (this finds portable installs)
+4. `InstallLocation` in the
+   `Software\Microsoft\Windows\CurrentVersion\Uninstall\Playnite` registry key
+   (`HKCU`, then `HKLM`)
+5. `%LOCALAPPDATA%\Playnite`, `%PROGRAMFILES%\Playnite`, `%APPDATA%\Playnite`
+6. `K:\Games\Playnite\Playnite\LiteDB.dll`
+
+An explicit `--dll` or `GAMELIB_LITEDB` that doesn't exist is an error; it is not
+silently replaced by auto-detection. If none of these work, pass `--dll` or set `GAMELIB_LITEDB` to the copy next to
+`Playnite.DesktopApp.exe`.
 
 `gamelib-insights` (or `uv run game_insights.py`)
 
