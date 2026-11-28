@@ -1,10 +1,34 @@
 [project]
 name = "gamelib"
 version = "0.1.0"
-description = "Add your description here"
+description = "Export a Playnite game library to DuckDB and generate an HTML insights dashboard"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "duckdb>=2.0.1",
     "pythonnet>=3.2.1",
 ]
+
+[project.scripts]
+gamelib-export = "playnite_to_duckdb:main"
+gamelib-insights = "game_insights:main"
+gamelib-server = "duckdb_server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["playnite_to_duckdb.py", "game_insights.py", "gamelib_db.py", "duckdb_server.py", "templates"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["playnite_to_duckdb.py", "game_insights.py", "gamelib_db.py", "duckdb_server.py", "templates", "README.md", "pyproject.toml"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
