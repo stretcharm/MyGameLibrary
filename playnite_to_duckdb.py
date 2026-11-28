@@ -51,8 +51,11 @@ SELECT
     CAST(g.LastActivity AS TIMESTAMP) AS last_played,
     g.CommunityScore AS community_score,
     g.CriticScore AS critic_score,
-    ((COALESCE(g.CommunityScore, 0) + COALESCE(g.CriticScore, 0))
-     / CASE WHEN g.CriticScore IS NOT NULL AND g.CommunityScore IS NOT NULL THEN 2 ELSE 1 END) AS score,
+    CASE
+        WHEN g.CommunityScore IS NULL AND g.CriticScore IS NULL THEN NULL
+        ELSE (COALESCE(g.CommunityScore, 0) + COALESCE(g.CriticScore, 0))
+             / CASE WHEN g.CriticScore IS NOT NULL AND g.CommunityScore IS NOT NULL THEN 2 ELSE 1 END
+    END AS score,
     g.ReleaseDate AS release_date,
     g.PlayCount AS play_count,
     g.CompletionStatus."Name" AS completion_status,
