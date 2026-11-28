@@ -486,7 +486,8 @@ def build_analytics_and_recommendations(
         if not g["genres"]:
             continue
         # Deduplicate near-identical entries (e.g. FIFA Soccer 11 vs FIFA 11, Borderlands 2 vs Pre-Sequel)
-        prefix = g["name"].split(":")[0].split()[0].lower()
+        prefix_words = g["name"].split(":")[0].split()
+        prefix = prefix_words[0].lower() if prefix_words else normalize_title(g["name"])
         if any(s in seen_series for s in g["series"]):
             continue
         if prefix in seen_prefixes and g["hours"] < 200:
