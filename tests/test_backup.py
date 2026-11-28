@@ -317,3 +317,20 @@ class TestFreshBackup:
         (tmp_path / "LiteDB.dll").write_bytes(b"")
         (tmp_path / m.DESKTOP_EXE).write_bytes(b"")
         assert m.find_playnite_exe(str(tmp_path / "LiteDB.dll")) == tmp_path / m.DESKTOP_EXE
+
+
+def test_default_out_matches_insights_db(tmp_path, monkeypatch):
+    """The export's default output must be the folder game_insights/gamelib-server read, not cwd-relative."""
+    monkeypatch.chdir(tmp_path)
+    seen = {}
+
+    def fake_connect(db_path, read_only=False):
+        seen["db"] = Path(db_path)
+        raise SystemExit("stop after resolving paths")
+
+    monkeypatch.setattr(m.gamelib_db, "connect", fake_connect)
+    monkeypatch.setattr(m.Path, "mkdir", lambda *a, **k: None)
+    monkeypatch.setattr(m.sys, "argv", ["gamelib-export"])
+    with pytest.raises(SystemExit):
+        m.main()
+    assert seen["db"].resolve() == m.gamelib_db.DEFAULT_DB.resolve()

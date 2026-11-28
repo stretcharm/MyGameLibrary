@@ -62,7 +62,7 @@ uv sync
 | --- | --- | --- |
 | `--library` | `%APPDATA%\Playnite\library` | Playnite library folder |
 | `--dll` | auto-detected | Path to Playnite's `LiteDB.dll` (see below) |
-| `--out` | `playnite_export` | Output folder |
+| `--out` | `playnite_export` (in the project folder) | Output folder |
 | `--duckdb` | `<out>/playnite.duckdb` | DuckDB file to write |
 | `--from-backup` | off | Export from this Playnite backup zip |
 | `--fresh-backup` | off | Have Playnite write a new backup first (restarts Playnite) |
@@ -97,8 +97,9 @@ silently replaced by auto-detection. If none of these work, pass `--dll` or set 
 Both tools can also be run directly as scripts, e.g.
 `uv run playnite_to_duckdb.py --help`.
 
-The default paths are relative to the project folder, so run the tools from a
-checkout (the `uv sync` install is editable).
+The default paths are in the project folder (next to the scripts), whatever the
+current directory, so the export, insights and server all use the same database.
+Run the tools from a checkout (the `uv sync` install is editable).
 
 ## DuckDB server (optional)
 
