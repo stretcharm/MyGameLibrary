@@ -6,8 +6,10 @@ can't read them directly. This script loads the LiteDB.dll that ships with
 Playnite (via pythonnet), dumps every collection to newline-delimited JSON,
 then loads each into a DuckDB table.
 
-Close Playnite before running (files are copied first, but a running Playnite
-may have un-flushed changes).
+Playnite doesn't need closing. It holds its library files exclusively while
+running, so if they can't be copied the newest Playnite backup is exported
+instead (with a warning about its age). Use --from-backup PATH for a specific
+backup, or --fresh-backup to have Playnite write one first (this restarts it).
 
 Usage:
     uv run playnite_to_duckdb.py
@@ -18,9 +20,14 @@ Exits non-zero (after exporting everything it can) if any file or table failed.
 import argparse
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 import tempfile
+import time
+import zipfile
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import duckdb
@@ -267,9 +274,273 @@ def find_litedb_dll(explicit: str | None) -> Path:
     )
 
 
-def find_playnite_exe() -> Path | None:
-    """Playnite.DesktopApp.exe, located through the same folders as LiteDB.dll."""
+def find_playnite_exe(dll_hint: str | None = None) -> Path | None:
+    """Playnite.DesktopApp.exe: next to an explicit LiteDB.dll (--dll / $GAMELIB_LITEDB), else
+    through the same folders as LiteDB.dll auto-detection."""
+    hint = dll_hint or os.environ.get(LITEDB_ENV)
+    if hint and _is_file(Path(hint).parent / DESKTOP_EXE):
+        return Path(hint).parent / DESKTOP_EXE
     return next((path for _source, path in _search_install_dirs(DESKTOP_EXE)), None)
+
+
+BACKUP_NAME_RE = re.compile(r"^PlayniteBackup-(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})\.zip$", re.IGNORECASE)
+ERROR_SHARING_VIOLATION = 32
+ERROR_LOCK_VIOLATION = 33
+BACKUP_POLL_SECONDS = 1.0
+
+
+class LibraryLocked(Exception):
+    """The Playnite library files are held open (exclusively) by a running Playnite."""
+
+
+def is_lock_error(e: OSError) -> bool:
+    """True only for Windows sharing/lock violations (32/33); other permission errors are real failures."""
+    return getattr(e, "winerror", None) in (ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION)
+
+
+def copy_library(library: Path, dest: Path) -> list[str]:
+    """Copy library/*.db into dest. Returns per-file failures (other than locks).
+
+    Raises LibraryLocked if any file is locked; the caller should discard dest.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    failures: list[str] = []
+    for src in sorted(library.glob("*.db")):
+        try:
+            shutil.copy2(src, dest / src.name)  # never touch the live file
+        except OSError as e:
+            if is_lock_error(e):
+                raise LibraryLocked(f"{src.name}: {e}") from e
+            print(f"!! {src.name}: {e}")
+            failures.append(f"{src.name}: {e}")
+    return failures
+
+
+def backup_timestamp(zip_path: Path) -> datetime:
+    """Backup time from the PlayniteBackup-YYYY-MM-DD-HH-MM-SS.zip name (local time), else mtime."""
+    m = BACKUP_NAME_RE.match(zip_path.name)
+    if m:
+        return datetime(*map(int, m.groups()))
+    return datetime.fromtimestamp(zip_path.stat().st_mtime)
+
+
+def find_backups(backup_dir: Path) -> list[Path]:
+    """PlayniteBackup-*.zip files in backup_dir, newest first (by the timestamp in the name)."""
+    try:
+        zips = [p for p in backup_dir.iterdir() if BACKUP_NAME_RE.match(p.name) and p.is_file()]
+    except OSError:
+        return []
+    return sorted(zips, key=lambda p: BACKUP_NAME_RE.match(p.name).groups(), reverse=True)
+
+
+def find_newest_backup(backup_dir: Path) -> Path | None:
+    return next(iter(find_backups(backup_dir)), None)
+
+
+def playnite_data_dir(library: Path) -> Path:
+    """Playnite's user data folder (holds config.json): the library's parent, else %APPDATA%\\Playnite."""
+    if (library.parent / "config.json").is_file():
+        return library.parent
+    return Path(os.environ.get("APPDATA", "")) / "Playnite"
+
+
+def backup_dir_for(data_dir: Path) -> Path:
+    """AutoBackupDir from Playnite's config.json, falling back to <data dir>\\Backup.
+
+    Environment variables and ~ are expanded; a relative path is taken relative to
+    Playnite's data dir, not the current working directory.
+    """
+    try:
+        config = json.loads((data_dir / "config.json").read_text(encoding="utf-8-sig"))
+        configured = config.get("AutoBackupDir")
+        if configured:
+            path = Path(os.path.expanduser(os.path.expandvars(str(configured))))
+            return path if path.is_absolute() else data_dir / path
+    except (OSError, ValueError, AttributeError):
+        pass
+    return data_dir / "Backup"
+
+
+def format_age(delta: timedelta) -> str:
+    seconds = max(int(delta.total_seconds()), 0)
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+def library_db_members(z: zipfile.ZipFile) -> list[tuple[zipfile.ZipInfo, str]]:
+    """(entry, file name) for each library/*.db in the zip; accepts / or \\ separators."""
+    members = []
+    for info in z.infolist():
+        parts = info.filename.replace("\\", "/").split("/")
+        if len(parts) == 2 and parts[0].lower() == "library" and parts[1].lower().endswith(".db"):
+            members.append((info, parts[1]))
+    return members
+
+
+def extract_library(zip_path: Path, dest: Path) -> int:
+    """Extract only library/*.db from a Playnite backup into dest (flat). Returns the file count."""
+    dest.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with zipfile.ZipFile(zip_path) as z:  # opened read-only; the backup itself is never modified
+        for info, name in library_db_members(z):
+            with z.open(info) as src, open(dest / name, "wb") as out:
+                shutil.copyfileobj(src, out)
+            count += 1
+    if not count:
+        raise ValueError(f"{zip_path.name} has no library/*.db files (was the Library item included?)")
+    return count
+
+
+class BackupUnusable(Exception):
+    """A backup zip is missing, corrupt, or has no library/*.db files."""
+
+
+def stage_from_backup(zip_path: Path, dest: Path, reason: str) -> None:
+    """Extract the backup's library files into dest and warn how old they are.
+
+    Raises BackupUnusable if the zip can't be read or has no library files.
+    """
+    try:
+        taken = backup_timestamp(zip_path)
+        age = format_age(datetime.now() - taken)
+        print(
+            f"!! {reason} Exporting from backup {zip_path.name} (taken {taken:%Y-%m-%d %H:%M:%S}, {age} ago). "
+            "Changes made in Playnite since then are not included."
+        )
+        n = extract_library(zip_path, dest)
+    except (OSError, ValueError, zipfile.BadZipFile) as e:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise BackupUnusable(f"Couldn't read backup {zip_path}: {e}") from e
+    print(f"Extracted {n} library file(s) from {zip_path}")
+
+
+def zip_is_complete(path: Path) -> bool:
+    try:
+        with zipfile.ZipFile(path) as z:
+            return z.testzip() is None and bool(library_db_members(z))
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+
+def launch_playnite_backup(exe: Path, config: Path) -> None:
+    """Start `Playnite.DesktopApp.exe --backup <config>` without waiting for it."""
+    subprocess.Popen([str(exe), "--backup", str(config)], cwd=str(exe.parent))
+
+
+def require_playnite_exe(dll_hint: str | None = None) -> Path:
+    """Playnite.DesktopApp.exe for --fresh-backup, or exit with advice. Cheap, so run it early."""
+    exe = find_playnite_exe(dll_hint)
+    if exe is None:
+        sys.exit(
+            "--fresh-backup needs Playnite.DesktopApp.exe but couldn't find it. Start Playnite (so the "
+            "running process can be found), or set GAMELIB_LITEDB / pass --dll pointing at the LiteDB.dll "
+            "next to Playnite.DesktopApp.exe."
+        )
+    return exe
+
+
+def fresh_backup(exe: Path, library: Path, work: Path, timeout: float, poll: float | None = None) -> Path:
+    """Have Playnite write a new backup (restarting Playnite) and return the finished zip.
+
+    Writes a temp backup config whose OutputDir is a temp folder and which includes
+    only the core library item, launches Playnite's own backup, then waits for a
+    complete zip: stable size and opens as a zip.
+    """
+    out_dir = work / "fresh-backup"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    config = work / "backup-config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "DataDir": str(playnite_data_dir(library)),
+                "LibraryDir": str(library),
+                "OutputDir": str(out_dir),
+                # BackupDataItem: Settings=0, Library=1, LibraryFiles=2 (media), Extensions=3, Themes=4,
+                # ExtensionsData=5. Playnite's Backup.cs always writes the settings and core library
+                # files whatever is listed; 1 just names the Library item and adds nothing else.
+                "BackupItems": [1],
+                "ClosedWhenDone": False,
+                "CancelIfGameRunning": True,  # don't restart Playnite under a running game
+                "RotatingBackups": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    print(
+        f"!! --fresh-backup: Playnite ({exe}) will now RESTART to write a backup. "
+        f"Waiting up to {timeout:g}s for it."
+    )
+    launch_playnite_backup(exe, config)
+    poll = BACKUP_POLL_SECONDS if poll is None else poll
+    deadline = time.monotonic() + timeout
+    last: tuple[Path, int] | None = None
+    while time.monotonic() < deadline:
+        time.sleep(poll)
+        try:
+            newest = find_newest_backup(out_dir)
+            if newest is None:  # OutputDir naming is Playnite's own, but tolerate any zip
+                newest = max(out_dir.glob("*.zip"), key=lambda p: p.stat().st_mtime, default=None)
+            if newest is None:
+                continue
+            size = newest.stat().st_size
+        except OSError:  # renamed/rotated mid-poll: not ready yet
+            last = None
+            continue
+        if size > 0 and last == (newest, size) and zip_is_complete(newest):
+            return newest
+        last = (newest, size)
+    sys.exit(
+        f"Timed out after {timeout:g}s waiting for Playnite to write a backup. Playnite cancels the "
+        "backup if a game is running. Close the game, raise --backup-timeout, or use --from-backup."
+    )
+
+
+def stage_library(args, library: Path, staged: Path, work: Path, playnite_exe: Path | None = None) -> list[str]:
+    """Put a private copy of the library *.db files in `staged`; return non-fatal copy failures.
+
+    Order: --from-backup, --fresh-backup (needs playnite_exe), a direct copy of the
+    live files, then (if Playnite has them locked) the newest usable Playnite backup.
+    """
+    if args.from_backup:
+        try:
+            stage_from_backup(Path(args.from_backup), staged, "--from-backup given.")
+        except BackupUnusable as e:
+            sys.exit(str(e))
+        return []
+    if args.fresh_backup:
+        zip_path = fresh_backup(playnite_exe or require_playnite_exe(), library, work, args.backup_timeout)
+        try:
+            stage_from_backup(zip_path, staged, "Fresh backup written.")
+        except BackupUnusable as e:
+            sys.exit(str(e))
+        return []
+    try:
+        return copy_library(library, staged)
+    except LibraryLocked as e:
+        shutil.rmtree(staged, ignore_errors=True)
+        backup_dir = backup_dir_for(playnite_data_dir(library))
+        backups = find_backups(backup_dir)
+        if not backups:
+            sys.exit(
+                f"The Playnite library is locked ({e}) and no backup was found in {backup_dir}. "
+                "Close Playnite, or use --fresh-backup to have Playnite write one (this restarts Playnite)."
+            )
+        for zip_path in backups:
+            try:
+                stage_from_backup(zip_path, staged, "Playnite has the library locked.")
+                return []
+            except BackupUnusable as err:
+                print(f"!! {err}; trying the next-newest backup")
+        sys.exit(
+            f"The Playnite library is locked ({e}) and none of the {len(backups)} backup(s) in {backup_dir} "
+            "could be used. Close Playnite, or use --fresh-backup to have Playnite write one (this restarts Playnite)."
+        )
 
 
 def load_litedb(dll: Path):
@@ -319,6 +590,14 @@ def main():
     ap.add_argument("--dll", help="Path to Playnite's LiteDB.dll (default: $GAMELIB_LITEDB, else auto-detected)")
     ap.add_argument("--out", default="playnite_export", help="Output folder")
     ap.add_argument("--duckdb", default=None, help="DuckDB file (default: <out>/playnite.duckdb)")
+    source = ap.add_mutually_exclusive_group()
+    source.add_argument("--from-backup", metavar="PATH", help="Export from this Playnite backup zip instead of the live library")
+    source.add_argument(
+        "--fresh-backup",
+        action="store_true",
+        help="Have Playnite write a new backup first, then export from it (RESTARTS Playnite)",
+    )
+    ap.add_argument("--backup-timeout", type=float, default=180, help="Seconds to wait for --fresh-backup (default: 180)")
     args = ap.parse_args()
 
     library = Path(args.library)
@@ -326,18 +605,19 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     db_path = Path(args.duckdb) if args.duckdb else out / "playnite.duckdb"
 
+    playnite_exe = require_playnite_exe(args.dll) if args.fresh_backup else None  # before loading .NET
     dll = find_litedb_dll(args.dll)
     JsonSerializer, LiteDatabase = load_litedb(dll)
 
     exported: list[tuple[str, Path, int]] = []
     failures: list[str] = []
 
-    with tempfile.TemporaryDirectory() as tmp:
-        for src in sorted(library.glob("*.db")):
-            copy = Path(tmp) / src.name
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        staged = Path(tmp) / "library"
+        failures += stage_library(args, library, staged, Path(tmp), playnite_exe)
+        for src in sorted(staged.glob("*.db")):
             try:
-                shutil.copy2(src, copy)  # never touch the live file
-                with LiteDatabase(f"Filename={copy};ReadOnly=true") as db:
+                with LiteDatabase(f"Filename={src};ReadOnly=true") as db:
                     for coll_name in db.GetCollectionNames():
                         table = src.stem if coll_name.lower() in (src.stem.lower(), "") else f"{src.stem}_{coll_name}"
                         target = out / f"{table}.ndjson"
