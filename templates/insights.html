@@ -522,6 +522,8 @@
           <th data-sort="score" class="num">Score</th>
           <th data-sort="release_year" class="num">Year</th>
           <th data-sort="installed">Installed</th>
+          <th data-sort="status">Status</th>
+          <th data-sort="last_played">Last Played</th>
         </tr>
       </thead>
       <tbody id="tbl-body"></tbody>
@@ -754,7 +756,7 @@
     let list = data.recommendations.filter(r => {
       if (pool !== "all" && r.pool !== pool) return false;
       if (genre && !r.genres.includes(genre)) return false;
-      if (store && !r.store.split(", ").includes(store)) return false;
+      if (store && !r.stores.includes(store)) return false;
       if (instOnly && !r.installed) return false;
       if (q && !(r.name.toLowerCase().includes(q) || r.series.join(" ").toLowerCase().includes(q))) return false;
       return true;
@@ -916,6 +918,8 @@
         <td class="num">${g.score ?? "—"}</td>
         <td class="num">${g.release_year ?? "—"}</td>
         <td>${g.installed ? `Yes (${g.size_gb} GB)` : "No"}</td>
+        <td>${esc(g.status)}</td>
+        <td>${g.last_played ?? "—"}</td>
       </tr>
     `).join("");
   }

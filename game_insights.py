@@ -31,16 +31,18 @@ def normalize_title(name: str) -> str:
     return "".join(ch for ch in name.lower() if ch.isalnum())
 
 
+# Edition words only count as a trailing suffix, optionally after ":", "-" or "–"
+# (e.g. "Skyrim Special Edition", "Halo - Anniversary"), never mid-title ("Gold Rush: The Game").
 _EDITION_RE = re.compile(
-    r"\b(game of the year|goty|definitive|enhanced|complete|remastered|director'?s cut|"
-    r"legendary|ultimate|special|deluxe|standard|anniversary|gold|hd|edition)\b",
+    r"(?:[\s:\-–—]+(?:game of the year|goty|definitive|enhanced|complete|remastered|director'?s cut|"
+    r"legendary|ultimate|special|deluxe|standard|anniversary|gold|hd|edition)\b)+\s*$",
     re.IGNORECASE,
 )
 
 
 def normalize_base_title(name: str) -> str:
-    """Strip common edition suffixes before normalizing."""
-    stripped = _EDITION_RE.sub(" ", name.lower())
+    """Strip trailing edition suffixes before normalizing."""
+    stripped = _EDITION_RE.sub("", name.lower())
     return "".join(ch for ch in stripped if ch.isalnum())
 
 
@@ -187,7 +189,6 @@ def load_games(db_path: Path) -> list[dict[str, Any]]:
             critic_score,
             score,
             CAST(release_date AS VARCHAR) AS release_date,
-            COALESCE(play_count, 0) AS play_count,
             CAST(last_played AS VARCHAR) AS last_played,
             COALESCE(completion_status, 'Not Played') AS completion_status,
             developer_ids,
@@ -219,7 +220,6 @@ def load_games(db_path: Path) -> list[dict[str, Any]]:
             crit_score,
             score,
             release_date,
-            play_count,
             last_played,
             completion_status,
             dev_ids,
@@ -258,7 +258,6 @@ def load_games(db_path: Path) -> list[dict[str, Any]]:
                 "critic_score": int(crit_score) if crit_score is not None else None,
                 "score": round(float(score), 1) if score is not None else None,
                 "release_year": release_year,
-                "play_count": int(play_count or 0),
                 "last_played": last_played_clean,
                 "status": completion_status,
                 "hidden": bool(is_hidden),
@@ -444,16 +443,19 @@ def build_analytics_and_recommendations(
             "bonus_pts": round(bonus_pts, 1),
             "pool": "unplayed" if g["hours"] == 0 else "barely_touched",
             "reasons": reasons,
+            "stores": [g["store"]],
         }
         if norm in dedup_recs:
             existing = dedup_recs[norm]
-            if g["store"] not in existing["store"].split(", "):
-                existing["store"] = f"{existing['store']}, {g['store']}"
+            if g["store"] not in existing["stores"]:
+                existing["stores"].append(g["store"])
+                existing["store"] = ", ".join(existing["stores"])
             if g["installed"] and not existing["installed"]:
                 existing["installed"] = True
                 existing["size_gb"] = g["size_gb"]
             if entry["rec_score"] > existing["rec_score"]:
                 entry["store"] = existing["store"]
+                entry["stores"] = existing["stores"]
                 entry["installed"] = existing["installed"]
                 entry["size_gb"] = existing["size_gb"]
                 dedup_recs[norm] = entry
